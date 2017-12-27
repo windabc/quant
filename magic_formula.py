@@ -5,16 +5,21 @@ import datetime as dt
 import traceback
 
 def initialize(context):
+    # 开启动态复权模式(真实价格)
+    set_option('use_real_price', True)
+
     # 设置费率
-    set_commission(PerTrade(buy_cost=0.00025, sell_cost=0.00125, min_cost=5))
-    
+    #set_commission(PerTrade(buy_cost=0.00025, sell_cost=0.00125, min_cost=5))
+    # 股票类每笔交易时的手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5), type='stock')
+
     # 设置基准指数：沪深300指数 '000300.XSHG'
     set_benchmark('000300.XSHG')
     log.set_level('order', 'error')
     # 昨天
     g.yesterday = context.current_dt -dt.timedelta(1)
     g.stock_num = 30
-    
+
     run_monthly(stock_trading, 2, time='open')
 
 # 每三个月调仓换股
