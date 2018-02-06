@@ -20,47 +20,114 @@ def initialize(context):
     # 昨天
     g.yesterday = context.current_dt -dt.timedelta(1)
     g.stock_num = 30
+    g.mpt_history_days = 252
+    g.exp_ret = 0.2
+    g.last_adjust_month = 0
+    g.stocks_hold = []
 
-    run_monthly(stock_trading, 2, time='open')
+    run_monthly(stock_trading_monthly, 2, time='open')
+    #run_daily(stock_trading_daily, time='open')
+
+# 每三个月调仓换股,其余时间调整持仓各股占比
+def stock_trading_daily(context):
+    g.yesterday = context.current_dt -dt.timedelta(1)
+    # adjust_month = [1, 4, 7, 10]
+    # adjust_month = [2, 5, 8, 11]
+    adjust_month = [3, 6, 9, 12]
+    cur_month = context.current_dt.month
+    if cur_month in adjust_month and cur_month != g.last_adjust_month:
+        g.stocks_hold = list(select_stocks(context, g.stock_num))
+        g.last_adjust_month = cur_month
+        # ------先清仓------
+        for _stock in context.portfolio.positions:
+            if _stock in g.stocks_hold: continue
+            order_target(str(_stock), 0)
+        #print weights
+    if len(g.stocks_hold) < 1: return
+
+    dt_str = g.yesterday.strftime('%Y-%m-%d')
+    #for stock in g.stocks_hold: print "#MF_LIST#%s %s" % (dt_str, stock)
+    #weights = get_weight(g.stocks_hold)
+    weights = get_weight_mpt(g.stocks_hold)
+
+
+    # ------再买股票------
+    # 单份金额
+    #unit_money = context.portfolio.portfolio_value / g.stock_num
+    for _stock in g.stocks_hold:
+        _w = weights[_stock]
+        if _w < 0.00001:
+            order_target(str(_stock), 0)
+            continue
+        #print "stock:%s, weight=%.2f" % (_stock, _w)
+        #_w = 1.0 / g.stock_num
+        unit_money = context.portfolio.portfolio_value * _w
+        order_value(str(_stock), unit_money)
+
 
 # 每三个月调仓换股
-def stock_trading(context) :
+def stock_trading_monthly(context):
     g.yesterday = context.current_dt -dt.timedelta(1)
     #if g.yesterday.month not in [1, 4, 7, 10]:
     #if g.yesterday.month not in [2, 5, 8, 11]:
     if g.yesterday.month not in [3, 6, 9, 12]:
-        return
+       return
     
     buy_stocks = list(select_stocks(context, g.stock_num))
     dt_str = g.yesterday.strftime('%Y-%m-%d')
     #for stock in buy_stocks: print "#MF_LIST#%s %s" % (dt_str, stock)
     #weights = get_weight(buy_stocks)
     weights = get_weight_mpt(buy_stocks)
+    
+    #cur_data = get_current_data()
+    #for code in buy_stocks:
+    #    t = cur_data[code]
+    #    if t.is_st or t.paused:
+    #        print ">>>>>> %s(%s) paused:%s" % (code, t.name, str(t.paused))
 
-    # ------先清仓------
+    # ------先清仓 或者 减仓------
     for _stock in context.portfolio.positions:
-        if _stock in buy_stocks:
-            #buy_stocks.remove(_stock)
-            continue
-        order_target(str(_stock), 0)
-    print weights
+        ret = order_target(str(_stock), 0)
+#        cash = context.portfolio.available_cash
+#        _w = weights.get(_stock, 0)
+#        if _w < 0.00001: _w = 0
+#        unit_money = context.portfolio.portfolio_value * _w
+#        long_pos = context.portfolio.long_positions.get(_stock, None)
+#        value = 0 if long_pos == None else long_pos.value
+#        if _stock in buy_stocks and unit_money >= value:
+#            continue
+#        print "--- %s, cash:%.2f, cur:%.2f, target:%.2f" % (_stock, cash, value, unit_money)
+#        ret = order_target(str(_stock), unit_money)
+        if ret == None:
+            print "----- Failed to sell %s" % (_stock)
 
     # ------再买股票------
     # 单份金额
     #unit_money = context.portfolio.portfolio_value / g.stock_num
+    idx = 0
     for _stock in buy_stocks:
         _w = weights[_stock]
-        if _w < 0:
+        if _w < 0.00001:
             order_target(str(_stock), 0)
             continue
+        info = get_security_info(_stock)
+        idx = idx + 1
         #_w = 1.0 / g.stock_num
         unit_money = context.portfolio.portfolio_value * _w
-        order_value(str(_stock), unit_money)
+        print "(%02d): %s(%s) %.2f(%.6f)" % (idx, _stock, info.display_name, unit_money, _w)
+        #ret = order_value(_stock, unit_money)
+        ret = order_target_value(_stock, unit_money)
+        if ret == None:
+            cash = context.portfolio.available_cash
+            long_pos = None if _stock not in context.portfolio.long_positions else context.portfolio.long_positions[_stock]
+            value = 0 if long_pos == None else long_pos.value
+            print "+++++ Failed to buy %s(cur: %.2f, target: %.2f, cash:%.2f)" % (str(_stock),value,unit_money, cash)
+    print "======================================\n\n"
 
 def get_weight_mpt(stock_list):
-    rets = get_history_ret(stock_list, 252)
+    rets = get_history_ret(stock_list, g.mpt_history_days)
     #np_w = optimize(rets, 'sha')
-    np_w = optimize(rets, 'ret', 1)
+    np_w = optimize(rets, 'ret', g.exp_ret)
     df = pd.DataFrame(np_w, stock_list)
     df.columns = ['weight']
     return df['weight']
@@ -294,6 +361,14 @@ def filter_stocks(context):
     one_year = dt.timedelta(365)
     df = df[df.start_date < g.yesterday.date() - one_year]
     # 剔除ST
-    df = df[map(lambda s: not s.startswith("ST") and not s.startswith("*ST") ,df.display_name)]
+    #df = df[map(lambda s: not s.startswith("ST") and not s.startswith("*ST") ,df.display_name)]
+    
+    cur_data = get_current_data()
+    # 剔除ST、停牌、暂停交易股票
+    df = df.select(lambda code: not cur_data[code].is_st and not cur_data[code].paused)
+    #for code in df.index.values:
+    #    t = cur_data[code]
+    #    if t.is_st or t.paused:
+    #        print ">>>>>> %s(%s) paused:%s" % (code, t.name, str(t.paused))
     
     return df.index.values
